@@ -1,47 +1,104 @@
-version: "3.7"
 services:
-   kafka:
-    image: 'bitnami/kafka:3.2.3'
+  # --- MESSAGE BROKING & STREAMING (Kafka Stack) ---
+  zookeeper:
+    image: bitnami/zookeeper:latest
+    container_name: zookeeper
+    profiles: [kafka]
+    networks:
+      - ${DOCKER_NETWORK:-devtools}
+
+  kafka:
+    image: wurstmeister/kafka:2.13-2.8.1
     container_name: kafka
-    restart: unless-stopped
-    environment:
-      - ALLOW_PLAINTEXT_LISTENER=yes
-    volumes:
-      - ./kafka:/bitnami/kafka
+    depends_on:
+      - zookeeper
     ports:
       - "9092:9092"
+    environment:
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+    volumes:
+      - ${DATA_PATH:-./data}/kafka:/kafka
+    profiles: [kafka]
     networks:
-     - internal
-   kafka-ui:
-    image: provectuslabs/kafka-ui:master
+      - ${DOCKER_NETWORK:-devtools}
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
     container_name: kafka-ui
+    labels:
+      - "goma.enable=true"
+      - "goma.name=kafka"
+      # - "goma.hosts=kafka.localhost"
+      - "goma.path=/kafka"
+      - "goma.rewrite=/kafka"
+      - "goma.port=8080"
+    restart: unless-stopped
     ports:
       - "8074:8080"
-    restart: unless-stopped
     environment:
       - KAFKA_CLUSTERS_0_NAME=dev-cluster
       - KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS=kafka:9092
       # If you prefer UI for Apache Kafka in read only mode
-     # - KAFKA_CLUSTERS_0_READONLY=true
+      # - KAFKA_CLUSTERS_0_READONLY=true
+    profiles: [kafka]
     networks:
-     - internal  
-   redis:
-    image: redis:alpine
+      - ${DOCKER_NETWORK:-devtools}
+
+  # --- CACHING & NO-SQL ---
+  redis:
+    image: redis:8.6.2-alpine
     container_name: redis
     restart: unless-stopped
     command: redis-server --appendonly yes --requirepass "${REDIS_PASSWORD}"
     volumes:
-      - ./redis:/data
+      - ${DATA_PATH:-./data}/redis:/data
     ports:
-     - "6379:6379"
+      - "6379:6379"
+    profiles: [redis]
     networks:
-       - internal
-   mysql:
-    image: mysql:5.7.39
+      - ${DOCKER_NETWORK:-devtools}
+  redis-insight:
+    image: redislabs/redisinsight:3.2
+    container_name: redis-insight
+    volumes:
+      - ${DATA_PATH:-./data}/redisinsight:/data
+    ports:
+      - "8077:5540"
+    profiles: [redis]
+    networks:
+      - ${DOCKER_NETWORK:-devtools}
+  # --- INFRASTRUCTURE & MONITORING (Docker Management) ---
+  dozzle:
+    image: amir20/dozzle:latest
+    container_name: dozzle
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8078:8080"
+    profiles: [docker]
+    networks:
+      - ${DOCKER_NETWORK:-devtools}
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    command: -H unix:///var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./portainer:/data
+    ports:
+      - "8079:9000"
+    profiles: [docker]
+    networks:
+      - ${DOCKER_NETWORK:-devtools}
+  # --- RELATIONAL DATABASES (SQL) ---
+  mysql:
+    image: mysql:8.4
     container_name: mysql
     restart: unless-stopped
     volumes:
-      - ./mysql:/var/lib/mysql
+      - ${DATA_PATH:-./data}/mysql:/var/lib/mysql
+      - ./db.sql:/docker-entrypoint-initdb.d/init.sql
     environment:
       MYSQL_DATABASE: ${DB_DATABASE}
       MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
@@ -49,62 +106,175 @@ services:
       MYSQL_USER: ${DB_USERNAME}
     ports:
       - "3306:3306"
+    profiles: [mysql]
     networks:
-      - internal
-   phpmyadmin:
-    image: phpmyadmin:5.2.0-apache
+      - ${DOCKER_NETWORK:-devtools}
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin:5.2.3-fpm-alpine
     container_name: phpmyadmin
     depends_on:
-       - mysql
+      - mysql
     environment:
       PMA_HOST: mysql
       PMA_PORT: 3306
     restart: unless-stopped
     ports:
       - "8075:80"
+    profiles: [mysql]
     networks:
-      - internal
-   postgres:
-    image: postgres:14.5 
+      - ${DOCKER_NETWORK:-devtools}
+  postgres:
+    image: postgres:18.3
     container_name: postgres
     restart: unless-stopped
     volumes:
-      - ./postgres:/var/lib/postgresql/data
+      - ${DATA_PATH:-./data}/postgres:/var/lib/postgresql
     environment:
-      POSTGRES_DB: ${DB_DATABASE}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_USER: ${DB_USERNAME}
     ports:
       - "5432:5432"
+    profiles: [psql]
     networks:
-      - internal
-   pgadmin4:
-    container_name: pgadmin4
-    image: dpage/pgadmin4:7.3
+      - ${DOCKER_NETWORK:-devtools}
+  pgadmin:
+    container_name: pgadmin
+    image: dpage/pgadmin4:9.13
+    volumes:
+      - ${DATA_PATH:-.data}/pgadmin:/var/lib/pgadmin
     environment:
-      - PGADMIN_DEFAULT_EMAIL=admin@example.com
-      - PGADMIN_DEFAULT_PASSWORD=password
+      PGADMIN_DEFAULT_EMAIL: ${DB_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${DB_PASSWORD}
     ports:
       - "8076:80"
+    profiles: [psql]
     networks:
-      - internal
-   minio:
-    image: 'bitnami/minio:2023.7.7'
-    container_name:  minio
+      - ${DOCKER_NETWORK:-devtools}
+  # --- DEVELOPMENT TOOLS (Mail, Storage, API) ---
+  minio:
+    image: "minio/minio"
+    container_name: minio
     restart: unless-stopped
+    command: server /data --console-address ":9001"
     ports:
       # API Port
-      - '9000:9000'
+      - "9000:9000"
       # Console Port
-      - '9001:9001'
+      - "9001:9001"
     environment:
-      - MINIO_ROOT_USER=admin
-      - MINIO_ROOT_PASSWORD=password
+      MINIO_ROOT_USER: ${DB_USERNAME}
+      MINIO_ROOT_PASSWORD: ${DB_PASSWORD}
     volumes:
-      - ./minio:/data
+      - ${DATA_PATH:-./data}/minio:/data
+    profiles: [tools]
     networks:
-      - internal
+      - ${DOCKER_NETWORK:-devtools}
+  mailpit:
+    image: axllent/mailpit
+    container_name: mailpit
+    ports:
+      - "8025:8025" # UI
+      - "1025:1025" # SMTP
+    profiles: [mail]
+    networks:
+      - ${DOCKER_NETWORK:-devtools}
+  # --- OBSERVABILITY ---
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ${DATA_PATH:-./data}/prometheus:/etc/prometheus
+    profiles: [obs]
+    networks:
+      - ${DOCKER_NETWORK:-devtools}
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "8081:3000"
+    profiles: [obs]
+    networks:
+      - ${DOCKER_NETWORK:-devtools}
+
+  # --- SECURITY ---
+  vault:
+    image: hashicorp/vault:latest
+    container_name: vault
+    ports:
+      - "8200:8200"
+    environment:
+      - VAULT_DEV_ROOT_TOKEN_ID=root
+      - VAULT_ADDR=http://0.0.0.0:8200
+    cap_add:
+      - IPC_LOCK
+    profiles: [security]
+    networks:
+      - ${DOCKER_NETWORK:-devtools}
+
+  # --- API DOCS ---
+  swagger-ui:
+    image: swaggerapi/swagger-ui
+    container_name: swagger-ui
+    ports:
+      - "8083:8080"
+    profiles: [tools]
+    networks:
+      - ${DOCKER_NETWORK:-devtools}
+
+  # --- NETWORKING & PROXY ---
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TOKEN}
+    profiles: [proxy]
+    networks:
+      - ${DOCKER_NETWORK:-devtools}
+      
+  # --- GOMA GATEWAY ---
+  goma-gateway:
+    image: jkaninda/goma-gateway
+    container_name: gateway
+    profiles: [goma]
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Gateway configuration directory
+      - ${DATA_PATH:-./data}/goma:/etc/goma
+      # SSL certificates managed by Let's Encrypt
+      - ${DATA_PATH:-./data}/goma/letsencrypt:/etc/letsencrypt
+      # Optional: Docker provider configuration files
+      # Uncomment if using Docker provider for dynamic configuration
+      - ${DATA_PATH:-./data}/goma/providers:/etc/goma/providers
+    environment:
+      -  GOMA_EXTRA_CONFIG_DIR=/etc/goma/providers
+      -  GOMA_EXTRA_CONFIG_WATCH=true
+    healthcheck:
+      test: curl -f http://localhost/healthz || exit 1
+      interval: 30s
+      retries: 5
+      start_period: 20s
+      timeout: 10s
+    networks:
+      - ${DOCKER_NETWORK:-devtools}
+  goma-provider:
+    image: jkaninda/goma-docker-provider
+    container_name: goma-provider
+    profiles: [goma]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro 
+      - ${DATA_PATH:-./data}/goma/providers:/etc/goma/providers
+    environment:
+      - GOMA_OUTPUT_DIR=/etc/goma/providers # Optional, default /etc/goma/providers
+      - GOMA_ENABLE_SWARM=false # Enable Swarm mode, default false
+    networks:
+      - ${DOCKER_NETWORK:-devtools}
+
 networks:
-  internal:
-    external: false
-    name: internal 
+  devtools:
+    external: true
+    name: ${DOCKER_NETWORK:-devtools}
